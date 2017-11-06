@@ -237,6 +237,23 @@ GST_START_TEST (test_reply_expire)
 
 GST_END_TEST;
 
+GST_START_TEST (test_reply_discard)
+{
+  GstPromise *r;
+  struct change_data data = { 0, };
+
+  /* NULL promise => discard reply */
+  r = NULL;
+
+  /* no-op, we don't want a reply */
+  gst_promise_reply (r, NULL);
+
+  if (r)
+    gst_promise_unref (r);
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_reply_interrupt)
 {
   GstPromise *r;
@@ -565,6 +582,7 @@ gst_toc_suite (void)
   tcase_add_test (tc_chain, test_expire);
   tcase_add_test (tc_chain, test_change_callback);
   tcase_add_test (tc_chain, test_reply_expire);
+  tcase_add_test (tc_chain, test_reply_discard);
   tcase_add_test (tc_chain, test_reply_interrupt);
   tcase_add_test (tc_chain, test_reply_reply);
   tcase_add_test (tc_chain, test_interrupt_reply);

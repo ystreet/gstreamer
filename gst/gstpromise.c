@@ -127,7 +127,7 @@ gst_promise_wait (GstPromise * promise)
 
 /**
  * gst_promise_reply:
- * @promise: a #GstPromise
+ * @promise (allow-none): a #GstPromise
  * @s: (transfer full): a #GstStructure with the the reply contents
  *
  * Set a reply on @promise.  This will wake up any waiters with
@@ -136,7 +136,9 @@ gst_promise_wait (GstPromise * promise)
 void
 gst_promise_reply (GstPromise * promise, GstStructure * s)
 {
-  g_return_if_fail (promise != NULL);
+  /* Caller requested that no reply is necessary */
+  if (promise == NULL)
+    return;
 
   g_mutex_lock (&promise->lock);
   if (promise->result != GST_PROMISE_RESULT_PENDING &&
