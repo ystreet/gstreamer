@@ -58,24 +58,10 @@ typedef void (*GstPromiseChangeFunc) (GstPromise * promise, gpointer user_data);
 /**
  * GstPromise:
  * @parent: parent #GstMiniObject
- * @result: #GstPromiseResult state the promise is in
- * @promise: #GstStructure for the data that has been replied
  */
 struct _GstPromise
 {
   GstMiniObject         parent;
-
-  GstPromiseResult      result;
-  GstStructure         *promise;
-
-  /*< private >*/
-  GMutex                lock;
-  GCond                 cond;
-  GstPromiseChangeFunc  change_func;
-  gpointer              user_data;
-  GDestroyNotify        notify;
-
-  gpointer              _padding[GST_PADDING];
 };
 
 GstPromise *            gst_promise_new                 (void);
@@ -87,6 +73,9 @@ GstPromiseResult        gst_promise_wait                (GstPromise * promise);
 void                    gst_promise_reply               (GstPromise * promise, GstStructure * s);
 void                    gst_promise_interrupt           (GstPromise * promise);
 void                    gst_promise_expire              (GstPromise * promise);
+
+const GstStructure *    gst_promise_get_reply           (GstPromise * promise);
+GstPromiseResult        gst_promise_get_result          (GstPromise * promise);
 
 /**
  * gst_promise_ref:

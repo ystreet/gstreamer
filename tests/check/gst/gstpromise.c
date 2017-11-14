@@ -144,13 +144,15 @@ GST_START_TEST (test_reply_data)
 {
   GstPromise *r;
   GstStructure *s;
+  const GstStructure *ret;
 
   r = gst_promise_new ();
 
   s = gst_structure_new ("promise", "test", G_TYPE_INT, 1, NULL);
   gst_promise_reply (r, s);
   fail_unless (gst_promise_wait (r) == GST_PROMISE_RESULT_REPLIED);
-  fail_unless (gst_structure_is_equal (r->promise, s));
+  ret = gst_promise_get_reply (r);
+  fail_unless (gst_structure_is_equal (ret, s));
 
   gst_promise_unref (r);
 }
@@ -196,7 +198,7 @@ on_change (GstPromise * promise, gpointer user_data)
 {
   struct change_data *res = user_data;
 
-  res->result = promise->result;
+  res->result = gst_promise_get_result (promise);
   res->change_count += 1;
 }
 
@@ -240,7 +242,6 @@ GST_END_TEST;
 GST_START_TEST (test_reply_discard)
 {
   GstPromise *r;
-  struct change_data data = { 0, };
 
   /* NULL promise => discard reply */
   r = NULL;
@@ -279,6 +280,7 @@ GST_START_TEST (test_reply_reply)
   GstPromise *r;
   GstStructure *s;
   struct change_data data = { 0, };
+  const GstStructure *ret;
 
   r = gst_promise_new ();
 
@@ -289,7 +291,8 @@ GST_START_TEST (test_reply_reply)
   fail_unless (data.change_count == 1);
   ASSERT_CRITICAL (gst_promise_reply (r, NULL));
   fail_unless (gst_promise_wait (r) == GST_PROMISE_RESULT_REPLIED);
-  fail_unless (gst_structure_is_equal (r->promise, s));
+  ret = gst_promise_get_reply (r);
+  fail_unless (gst_structure_is_equal (ret, s));
   fail_unless (data.result == GST_PROMISE_RESULT_REPLIED);
   fail_unless (data.change_count == 1);
 

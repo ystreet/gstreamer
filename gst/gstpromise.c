@@ -39,7 +39,7 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
  * <ulink url="https://en.wikipedia.org/wiki/Futures_and_promises">https://en.wikipedia.org/wiki/Futures_and_promises</ulink>
  *
  * A #GstPromise can be created with gst_promise_new(), replied to
- * with gst_promise_reply(), interrupted with gst_promise_reply() and
+ * with gst_promise_reply(), interrupted with gst_promise_interrupt() and
  * expired with gst_promise_expire(). A callback can also be installed for
  * result changes with gst_promise_set_change_callback().
  *
@@ -57,6 +57,28 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
  * 2. That gst_promise_reply() and gst_promise_interrupt()
  * cannot be called twice.
  */
+
+#define GST_PROMISE_REPLY(p)            (((GstPromiseImpl *)(p))->reply)
+#define GST_PROMISE_RESULT(p)           (((GstPromiseImpl *)(p))->result)
+#define GST_PROMISE_LOCK(p)             (&(((GstPromiseImpl *)(p))->lock))
+#define GST_PROMISE_COND(p)             (&(((GstPromiseImpl *)(p))->cond))
+#define GST_PROMISE_CHANGE_FUNC(p)      (((GstPromiseImpl *)(p))->change_func)
+#define GST_PROMISE_CHANGE_DATA(p)      (((GstPromiseImpl *)(p))->user_data)
+#define GST_PROMISE_CHANGE_NOTIFY(p)    (((GstPromiseImpl *)(p))->notify)
+
+typedef struct
+{
+  GstPromise promise;
+
+  GstPromiseResult result;
+  GstStructure *reply;
+
+  GMutex lock;
+  GCond cond;
+  GstPromiseChangeFunc change_func;
+  gpointer user_data;
+  GDestroyNotify notify;
+} GstPromiseImpl;
 
 /**
  * gst_promise_set_reply_callback:
@@ -79,15 +101,15 @@ gst_promise_set_change_callback (GstPromise * promise,
 
   g_return_if_fail (promise != NULL);
 
-  g_mutex_lock (&promise->lock);
+  g_mutex_lock (GST_PROMISE_LOCK (promise));
 
-  prev_notify = promise->notify;
-  prev_data = promise->user_data;
-  promise->change_func = func;
-  promise->user_data = user_data;
-  promise->notify = notify;
+  prev_notify = GST_PROMISE_CHANGE_NOTIFY (promise);
+  prev_data = GST_PROMISE_CHANGE_DATA (promise);
+  GST_PROMISE_CHANGE_FUNC (promise) = func;
+  GST_PROMISE_CHANGE_DATA (promise) = user_data;
+  GST_PROMISE_CHANGE_NOTIFY (promise) = notify;
 
-  g_mutex_unlock (&promise->lock);
+  g_mutex_unlock (GST_PROMISE_LOCK (promise));
 
   if (prev_notify)
     prev_notify (prev_data);
@@ -110,24 +132,24 @@ gst_promise_wait (GstPromise * promise)
 
   g_return_val_if_fail (promise != NULL, GST_PROMISE_RESULT_EXPIRED);
 
-  g_mutex_lock (&promise->lock);
-  ret = promise->result;
+  g_mutex_lock (GST_PROMISE_LOCK (promise));
+  ret = GST_PROMISE_RESULT (promise);
 
   while (ret == GST_PROMISE_RESULT_PENDING) {
     GST_LOG ("%p waiting", promise);
-    g_cond_wait (&promise->cond, &promise->lock);
-    ret = promise->result;
+    g_cond_wait (GST_PROMISE_COND (promise), GST_PROMISE_LOCK (promise));
+    ret = GST_PROMISE_RESULT (promise);
   }
   GST_LOG ("%p waited", promise);
 
-  g_mutex_unlock (&promise->lock);
+  g_mutex_unlock (GST_PROMISE_LOCK (promise));
 
   return ret;
 }
 
 /**
  * gst_promise_reply:
- * @promise (allow-none): a #GstPromise
+ * @promise: (allow-none): a #GstPromise
  * @s: (transfer full): a #GstStructure with the the reply contents
  *
  * Set a reply on @promise.  This will wake up any waiters with
@@ -140,36 +162,63 @@ gst_promise_reply (GstPromise * promise, GstStructure * s)
   if (promise == NULL)
     return;
 
-  g_mutex_lock (&promise->lock);
-  if (promise->result != GST_PROMISE_RESULT_PENDING &&
-      promise->result != GST_PROMISE_RESULT_INTERRUPTED) {
-    GstPromiseResult result = promise->result;
-    g_mutex_unlock (&promise->lock);
+  g_mutex_lock (GST_PROMISE_LOCK (promise));
+  if (GST_PROMISE_RESULT (promise) != GST_PROMISE_RESULT_PENDING &&
+      GST_PROMISE_RESULT (promise) != GST_PROMISE_RESULT_INTERRUPTED) {
+    GstPromiseResult result = GST_PROMISE_RESULT (promise);
+    g_mutex_unlock (GST_PROMISE_LOCK (promise));
     g_return_if_fail (result == GST_PROMISE_RESULT_PENDING ||
         result == GST_PROMISE_RESULT_INTERRUPTED);
   }
 
   /* XXX: is this necessary and valid? */
-  if (promise->promise && promise->promise != s)
-    gst_structure_free (promise->promise);
+  if (GST_PROMISE_REPLY (promise) && GST_PROMISE_REPLY (promise) != s)
+    gst_structure_free (GST_PROMISE_REPLY (promise));
 
   /* Only reply iff we are currently in pending */
-  if (promise->result == GST_PROMISE_RESULT_PENDING) {
-    promise->result = GST_PROMISE_RESULT_REPLIED;
+  if (GST_PROMISE_RESULT (promise) == GST_PROMISE_RESULT_PENDING) {
+    GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_REPLIED;
     GST_LOG ("%p replied", promise);
 
-    promise->promise = s;
+    GST_PROMISE_REPLY (promise) = s;
 
-    if (promise->change_func)
-      promise->change_func (promise, promise->user_data);
+    if (GST_PROMISE_CHANGE_FUNC (promise))
+      GST_PROMISE_CHANGE_FUNC (promise) (promise,
+          GST_PROMISE_CHANGE_DATA (promise));
   } else {
     /* eat the value */
     if (s)
       gst_structure_free (s);
   }
 
-  g_cond_broadcast (&promise->cond);
-  g_mutex_unlock (&promise->lock);
+  g_cond_broadcast (GST_PROMISE_COND (promise));
+  g_mutex_unlock (GST_PROMISE_LOCK (promise));
+}
+
+/**
+ * gst_promise_get_reply:
+ * @promise: a #GstPromise
+ *
+ * Retrieve the reply set on @promise.  @promise must be in
+ * %GST_PROMISE_RESULT_REPLIED
+ *
+ * Returns: (transfer none): The reply set on @promise
+ */
+const GstStructure *
+gst_promise_get_reply (GstPromise * promise)
+{
+  g_return_val_if_fail (promise != NULL, NULL);
+
+  g_mutex_lock (GST_PROMISE_LOCK (promise));
+  if (GST_PROMISE_RESULT (promise) != GST_PROMISE_RESULT_REPLIED) {
+    GstPromiseResult result = GST_PROMISE_RESULT (promise);
+    g_mutex_unlock (GST_PROMISE_LOCK (promise));
+    g_return_val_if_fail (result == GST_PROMISE_RESULT_REPLIED, NULL);
+  }
+
+  g_mutex_unlock (GST_PROMISE_LOCK (promise));
+
+  return GST_PROMISE_REPLY (promise);
 }
 
 /**
@@ -184,23 +233,24 @@ gst_promise_interrupt (GstPromise * promise)
 {
   g_return_if_fail (promise != NULL);
 
-  g_mutex_lock (&promise->lock);
-  if (promise->result != GST_PROMISE_RESULT_PENDING &&
-      promise->result != GST_PROMISE_RESULT_REPLIED) {
-    GstPromiseResult result = promise->result;
-    g_mutex_unlock (&promise->lock);
+  g_mutex_lock (GST_PROMISE_LOCK (promise));
+  if (GST_PROMISE_RESULT (promise) != GST_PROMISE_RESULT_PENDING &&
+      GST_PROMISE_RESULT (promise) != GST_PROMISE_RESULT_REPLIED) {
+    GstPromiseResult result = GST_PROMISE_RESULT (promise);
+    g_mutex_unlock (GST_PROMISE_LOCK (promise));
     g_return_if_fail (result == GST_PROMISE_RESULT_PENDING ||
         result == GST_PROMISE_RESULT_REPLIED);
   }
   /* only interrupt if we are currently in pending */
-  if (promise->result == GST_PROMISE_RESULT_PENDING) {
-    promise->result = GST_PROMISE_RESULT_INTERRUPTED;
-    g_cond_broadcast (&promise->cond);
+  if (GST_PROMISE_RESULT (promise) == GST_PROMISE_RESULT_PENDING) {
+    GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_INTERRUPTED;
+    g_cond_broadcast (GST_PROMISE_COND (promise));
     GST_LOG ("%p interrupted", promise);
-    if (promise->change_func)
-      promise->change_func (promise, promise->user_data);
+    if (GST_PROMISE_CHANGE_FUNC (promise))
+      GST_PROMISE_CHANGE_FUNC (promise) (promise,
+          GST_PROMISE_CHANGE_DATA (promise));
   }
-  g_mutex_unlock (&promise->lock);
+  g_mutex_unlock (GST_PROMISE_LOCK (promise));
 }
 
 /**
@@ -215,15 +265,33 @@ gst_promise_expire (GstPromise * promise)
 {
   g_return_if_fail (promise != NULL);
 
-  g_mutex_lock (&promise->lock);
-  if (promise->result == GST_PROMISE_RESULT_PENDING) {
-    promise->result = GST_PROMISE_RESULT_EXPIRED;
-    g_cond_broadcast (&promise->cond);
+  g_mutex_lock (GST_PROMISE_LOCK (promise));
+  if (GST_PROMISE_RESULT (promise) == GST_PROMISE_RESULT_PENDING) {
+    GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_EXPIRED;
+    g_cond_broadcast (GST_PROMISE_COND (promise));
     GST_LOG ("%p expired", promise);
-    if (promise->change_func)
-      promise->change_func (promise, promise->user_data);
+    if (GST_PROMISE_CHANGE_FUNC (promise))
+      GST_PROMISE_CHANGE_FUNC (promise) (promise,
+          GST_PROMISE_CHANGE_DATA (promise));
   }
-  g_mutex_unlock (&promise->lock);
+  g_mutex_unlock (GST_PROMISE_LOCK (promise));
+}
+
+/**
+ * gst_promise_get_result:
+ * @promise: a #GstPromise
+ *
+ * Retrieve the reply set on @promise.  @promise must be in
+ * %GST_PROMISE_RESULT_REPLIED
+ *
+ * Returns: (transfer none): The reply set on @promise
+ */
+GstPromiseResult
+gst_promise_get_result (GstPromise * promise)
+{
+  g_return_val_if_fail (promise != NULL, GST_PROMISE_RESULT_EXPIRED);
+
+  return GST_PROMISE_RESULT (promise);
 }
 
 static void
@@ -232,15 +300,15 @@ gst_promise_free (GstMiniObject * object)
   GstPromise *promise = (GstPromise *) object;
 
   /* the promise *must* be dealt with in some way before destruction */
-  g_warn_if_fail (promise->result != GST_PROMISE_RESULT_PENDING);
+  g_warn_if_fail (GST_PROMISE_RESULT (promise) != GST_PROMISE_RESULT_PENDING);
 
-  if (promise->notify)
-    promise->notify (promise->user_data);
+  if (GST_PROMISE_CHANGE_NOTIFY (promise))
+    GST_PROMISE_CHANGE_NOTIFY (promise) (GST_PROMISE_CHANGE_DATA (promise));
 
-  if (promise->promise)
-    gst_structure_free (promise->promise);
-  g_mutex_clear (&promise->lock);
-  g_cond_clear (&promise->cond);
+  if (GST_PROMISE_REPLY (promise))
+    gst_structure_free (GST_PROMISE_REPLY (promise));
+  g_mutex_clear (GST_PROMISE_LOCK (promise));
+  g_cond_clear (GST_PROMISE_COND (promise));
   GST_LOG ("%p finalized", promise);
 
   g_free (promise);
@@ -259,10 +327,10 @@ gst_promise_init (GstPromise * promise)
   gst_mini_object_init (GST_MINI_OBJECT (promise), 0, GST_TYPE_PROMISE, NULL,
       NULL, gst_promise_free);
 
-  promise->promise = NULL;
-  promise->result = GST_PROMISE_RESULT_PENDING;
-  g_mutex_init (&promise->lock);
-  g_cond_init (&promise->cond);
+  GST_PROMISE_REPLY (promise) = NULL;
+  GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_PENDING;
+  g_mutex_init (GST_PROMISE_LOCK (promise));
+  g_cond_init (GST_PROMISE_COND (promise));
 }
 
 /**
@@ -273,7 +341,7 @@ gst_promise_init (GstPromise * promise)
 GstPromise *
 gst_promise_new (void)
 {
-  GstPromise *promise = g_new0 (GstPromise, 1);
+  GstPromise *promise = GST_PROMISE (g_new0 (GstPromiseImpl, 1));
 
   gst_promise_init (promise);
   GST_LOG ("new promise %p", promise);
