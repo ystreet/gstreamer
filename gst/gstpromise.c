@@ -40,8 +40,21 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
  *
  * A #GstPromise can be created with gst_promise_new(), replied to
  * with gst_promise_reply(), interrupted with gst_promise_interrupt() and
- * expired with gst_promise_expire(). A callback can also be installed for
- * result changes with gst_promise_set_change_callback().
+ * expired with gst_promise_expire(). A callback can also be installed at
+ * #GstPromise creation for result changes with gst_promise_new_with_change_func().
+ * The change callback can be used to chain #GstPromises's together as in the
+ * following example.
+ * |[<!-- language="C" -->
+ * const GstStructure *reply;
+ * GstPromise *p;
+ * if (gst_promise_wait (promise) != GST_PROMISE_RESULT_REPLIED)
+ *   return; // interrupted or expired value
+ * reply = gst_promise_get_reply (promise);
+ * if (error in reply)
+ *   return; // propagate error
+ * p = gst_promise_new_with_change_func (another_promise_change_func, user_data, notify);
+ * pass p to promise-using API
+ * ]|
  *
  * Each #GstPromise starts out with a #GstPromiseResult of
  * %GST_PROMISE_RESULT_PENDING and only ever transitions out of that result
@@ -57,6 +70,8 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
  * 2. That gst_promise_reply() and gst_promise_interrupt()
  * cannot be called twice.
  */
+
+static const int immutable_structure_refcount = 2;
 
 #define GST_PROMISE_REPLY(p)            (((GstPromiseImpl *)(p))->reply)
 #define GST_PROMISE_RESULT(p)           (((GstPromiseImpl *)(p))->result)
@@ -79,41 +94,6 @@ typedef struct
   gpointer user_data;
   GDestroyNotify notify;
 } GstPromiseImpl;
-
-/**
- * gst_promise_set_reply_callback:
- * @promise: a #GstPromise
- * @func: a #GstPromiseChangeFunc
- * @user_data: (scope async): data to invoke @func with
- * @notify: a #GDestroyNotify to free @data when no longer needed
- */
-/* XXX: do we want to cater for the case where the following could happen?
- * gst_promise_new()
- * gst_promise_reply()
- * gst_promise_set_change_callback () on different thread to gst_promise_reply().
- */
-void
-gst_promise_set_change_callback (GstPromise * promise,
-    GstPromiseChangeFunc func, gpointer user_data, GDestroyNotify notify)
-{
-  GDestroyNotify prev_notify;
-  gpointer prev_data;
-
-  g_return_if_fail (promise != NULL);
-
-  g_mutex_lock (GST_PROMISE_LOCK (promise));
-
-  prev_notify = GST_PROMISE_CHANGE_NOTIFY (promise);
-  prev_data = GST_PROMISE_CHANGE_DATA (promise);
-  GST_PROMISE_CHANGE_FUNC (promise) = func;
-  GST_PROMISE_CHANGE_DATA (promise) = user_data;
-  GST_PROMISE_CHANGE_NOTIFY (promise) = notify;
-
-  g_mutex_unlock (GST_PROMISE_LOCK (promise));
-
-  if (prev_notify)
-    prev_notify (prev_data);
-}
 
 /**
  * gst_promise_wait:
@@ -158,6 +138,9 @@ gst_promise_wait (GstPromise * promise)
 void
 gst_promise_reply (GstPromise * promise, GstStructure * s)
 {
+  GstPromiseChangeFunc change_func = NULL;
+  gpointer change_data = NULL;
+
   /* Caller requested that no reply is necessary */
   if (promise == NULL)
     return;
@@ -177,14 +160,21 @@ gst_promise_reply (GstPromise * promise, GstStructure * s)
 
   /* Only reply iff we are currently in pending */
   if (GST_PROMISE_RESULT (promise) == GST_PROMISE_RESULT_PENDING) {
+    if (s
+        && !gst_structure_set_parent_refcount (s,
+            (int *) &immutable_structure_refcount)) {
+      g_critical ("Input structure has a parent already!");
+      g_mutex_unlock (GST_PROMISE_LOCK (promise));
+      return;
+    }
+
     GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_REPLIED;
     GST_LOG ("%p replied", promise);
 
     GST_PROMISE_REPLY (promise) = s;
 
-    if (GST_PROMISE_CHANGE_FUNC (promise))
-      GST_PROMISE_CHANGE_FUNC (promise) (promise,
-          GST_PROMISE_CHANGE_DATA (promise));
+    change_func = GST_PROMISE_CHANGE_FUNC (promise);
+    change_data = GST_PROMISE_CHANGE_DATA (promise);
   } else {
     /* eat the value */
     if (s)
@@ -193,6 +183,9 @@ gst_promise_reply (GstPromise * promise, GstStructure * s)
 
   g_cond_broadcast (GST_PROMISE_COND (promise));
   g_mutex_unlock (GST_PROMISE_LOCK (promise));
+
+  if (change_func)
+    change_func (promise, change_data);
 }
 
 /**
@@ -200,7 +193,7 @@ gst_promise_reply (GstPromise * promise, GstStructure * s)
  * @promise: a #GstPromise
  *
  * Retrieve the reply set on @promise.  @promise must be in
- * %GST_PROMISE_RESULT_REPLIED
+ * %GST_PROMISE_RESULT_REPLIED and is owned by @promise
  *
  * Returns: (transfer none): The reply set on @promise
  */
@@ -231,6 +224,9 @@ gst_promise_get_reply (GstPromise * promise)
 void
 gst_promise_interrupt (GstPromise * promise)
 {
+  GstPromiseChangeFunc change_func = NULL;
+  gpointer change_data = NULL;
+
   g_return_if_fail (promise != NULL);
 
   g_mutex_lock (GST_PROMISE_LOCK (promise));
@@ -246,11 +242,14 @@ gst_promise_interrupt (GstPromise * promise)
     GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_INTERRUPTED;
     g_cond_broadcast (GST_PROMISE_COND (promise));
     GST_LOG ("%p interrupted", promise);
-    if (GST_PROMISE_CHANGE_FUNC (promise))
-      GST_PROMISE_CHANGE_FUNC (promise) (promise,
-          GST_PROMISE_CHANGE_DATA (promise));
+
+    change_func = GST_PROMISE_CHANGE_FUNC (promise);
+    change_data = GST_PROMISE_CHANGE_DATA (promise);
   }
   g_mutex_unlock (GST_PROMISE_LOCK (promise));
+
+  if (change_func)
+    change_func (promise, change_data);
 }
 
 /**
@@ -263,6 +262,9 @@ gst_promise_interrupt (GstPromise * promise)
 void
 gst_promise_expire (GstPromise * promise)
 {
+  GstPromiseChangeFunc change_func = NULL;
+  gpointer change_data = NULL;
+
   g_return_if_fail (promise != NULL);
 
   g_mutex_lock (GST_PROMISE_LOCK (promise));
@@ -270,28 +272,16 @@ gst_promise_expire (GstPromise * promise)
     GST_PROMISE_RESULT (promise) = GST_PROMISE_RESULT_EXPIRED;
     g_cond_broadcast (GST_PROMISE_COND (promise));
     GST_LOG ("%p expired", promise);
-    if (GST_PROMISE_CHANGE_FUNC (promise))
-      GST_PROMISE_CHANGE_FUNC (promise) (promise,
-          GST_PROMISE_CHANGE_DATA (promise));
+
+    change_func = GST_PROMISE_CHANGE_FUNC (promise);
+    change_data = GST_PROMISE_CHANGE_DATA (promise);
+    GST_PROMISE_CHANGE_FUNC (promise) = NULL;
+    GST_PROMISE_CHANGE_DATA (promise) = NULL;
   }
   g_mutex_unlock (GST_PROMISE_LOCK (promise));
-}
 
-/**
- * gst_promise_get_result:
- * @promise: a #GstPromise
- *
- * Retrieve the reply set on @promise.  @promise must be in
- * %GST_PROMISE_RESULT_REPLIED
- *
- * Returns: (transfer none): The reply set on @promise
- */
-GstPromiseResult
-gst_promise_get_result (GstPromise * promise)
-{
-  g_return_val_if_fail (promise != NULL, GST_PROMISE_RESULT_EXPIRED);
-
-  return GST_PROMISE_RESULT (promise);
+  if (change_func)
+    change_func (promise, change_data);
 }
 
 static void
@@ -305,8 +295,10 @@ gst_promise_free (GstMiniObject * object)
   if (GST_PROMISE_CHANGE_NOTIFY (promise))
     GST_PROMISE_CHANGE_NOTIFY (promise) (GST_PROMISE_CHANGE_DATA (promise));
 
-  if (GST_PROMISE_REPLY (promise))
+  if (GST_PROMISE_REPLY (promise)) {
+    gst_structure_set_parent_refcount (GST_PROMISE_REPLY (promise), NULL);
     gst_structure_free (GST_PROMISE_REPLY (promise));
+  }
   g_mutex_clear (GST_PROMISE_LOCK (promise));
   g_cond_clear (GST_PROMISE_COND (promise));
   GST_LOG ("%p finalized", promise);
@@ -345,6 +337,31 @@ gst_promise_new (void)
 
   gst_promise_init (promise);
   GST_LOG ("new promise %p", promise);
+
+  return promise;
+}
+
+/**
+ * gst_promise_new_with_change_func:
+ * @func: (scope notified): a #GstPromiseChangeFunc to call
+ * @user_data: (closure): argument to call @func with
+ * @notify: notification function that @user_data is no longer needed
+ *
+ * @func will be called exactly once when transitioning out of
+ * %GST_PROMISE_RESULT_PENDING into any of the other #GstPromiseResult
+ * states.
+ *
+ * Returns: a new #GstPromise
+ */
+GstPromise *
+gst_promise_new_with_change_func (GstPromiseChangeFunc func, gpointer user_data,
+    GDestroyNotify notify)
+{
+  GstPromise *promise = gst_promise_new ();
+
+  GST_PROMISE_CHANGE_FUNC (promise) = func;
+  GST_PROMISE_CHANGE_DATA (promise) = user_data;
+  GST_PROMISE_CHANGE_NOTIFY (promise) = notify;
 
   return promise;
 }

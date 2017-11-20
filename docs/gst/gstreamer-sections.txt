@@ -2681,14 +2681,14 @@ GstRegistryPrivate
 <FILE>gstpromise</FILE>
 <TITLE>GstPromise</TITLE>
 GstPromiseResult
-GstPromiseReplyFunc
+GstPromiseChangeFunc
 GstPromise
 gst_promise_new
+gst_promise_new_with_change_func
 gst_promise_ref
 gst_promise_unref
 gst_promise_wait
 gst_promise_reply
-gst_promise_set_reply_callback
 gst_promise_interrupt
 gst_promise_expire
 <SUBSECTION Standard>

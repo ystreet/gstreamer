@@ -32,10 +32,13 @@ typedef struct _GstPromise GstPromise;
 
 /**
  * GstPromiseResult:
- * @GST_PROMISE_RESULT_PENDING: Initial state
- * @GST_PROMISE_RESULT_INTERRUPTED: Interrupted by caller, other state changes ignored
- * @GST_PROMISE_RESULT_REPLIED: a receiver marked a reply
- * @GST_PROMISE_RESULT_EXPIRED: The promise expired (the carrying message lost all refs)
+ * @GST_PROMISE_RESULT_PENDING: Initial state. Waiting for transition to any
+ * 	other state.
+ * @GST_PROMISE_RESULT_INTERRUPTED: Interrupted by the consumer as it doesn't
+ * 	want the value anymore.
+ * @GST_PROMISE_RESULT_REPLIED: A producer marked a reply
+ * @GST_PROMISE_RESULT_EXPIRED: The promise expired (the carrying object
+ * 	lost all refs) and the promise will never be fulfilled.
  *
  * The result of a #GstPromise
  */
@@ -50,7 +53,6 @@ typedef enum
 /**
  * GstPromiseChangeFunc:
  * @promise: a #GstPromise
- * @result: the change
  * @user_data: (closure): user data
  */
 typedef void (*GstPromiseChangeFunc) (GstPromise * promise, gpointer user_data);
@@ -64,22 +66,22 @@ struct _GstPromise
   GstMiniObject         parent;
 };
 
-GstPromise *            gst_promise_new                 (void);
-void                    gst_promise_set_change_callback (GstPromise * promise,
-                                                         GstPromiseChangeFunc func,
-                                                         gpointer user_data,
-                                                         GDestroyNotify notify);
-GstPromiseResult        gst_promise_wait                (GstPromise * promise);
-void                    gst_promise_reply               (GstPromise * promise, GstStructure * s);
-void                    gst_promise_interrupt           (GstPromise * promise);
-void                    gst_promise_expire              (GstPromise * promise);
+GstPromise *            gst_promise_new                     (void);
+GstPromise *            gst_promise_new_with_change_func    (GstPromiseChangeFunc func,
+                                                             gpointer user_data,
+                                                             GDestroyNotify notify);
 
-const GstStructure *    gst_promise_get_reply           (GstPromise * promise);
-GstPromiseResult        gst_promise_get_result          (GstPromise * promise);
+GstPromiseResult        gst_promise_wait                    (GstPromise * promise);
+void                    gst_promise_reply                   (GstPromise * promise,
+                                                             GstStructure * s);
+void                    gst_promise_interrupt               (GstPromise * promise);
+void                    gst_promise_expire                  (GstPromise * promise);
+
+const GstStructure *    gst_promise_get_reply               (GstPromise * promise);
 
 /**
  * gst_promise_ref:
- * @promise: a #GstRespone.
+ * @promise: a #GstPromise.
  *
  * Increases the refcount of the given @promise by one.
  *

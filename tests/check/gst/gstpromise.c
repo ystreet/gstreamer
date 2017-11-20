@@ -64,7 +64,7 @@ _promise_thread (struct event_queue *q)
 }
 
 static void
-_start_thread (struct event_queue *q)
+event_queue_start (struct event_queue *q)
 {
   g_mutex_lock (&q->lock);
   q->thread = g_thread_new ("promise-thread", (GThreadFunc) _promise_thread, q);
@@ -75,12 +75,22 @@ _start_thread (struct event_queue *q)
 }
 
 static void
-_stop_thread (struct event_queue *q)
+event_queue_stop (struct event_queue *q)
 {
   g_mutex_lock (&q->lock);
-  g_main_loop_quit (q->main_loop);
-  while (q->main_loop)
+  if (q->main_loop)
+    g_main_loop_quit (q->main_loop);
+  g_mutex_unlock (&q->lock);
+}
+
+static void
+event_queue_stop_wait (struct event_queue *q)
+{
+  g_mutex_lock (&q->lock);
+  while (q->main_loop) {
+    g_main_loop_quit (q->main_loop);
     g_cond_wait (&q->cond, &q->lock);
+  }
   g_mutex_unlock (&q->lock);
 
   g_thread_unref (q->thread);
@@ -95,7 +105,7 @@ event_queue_new (void)
 
   g_mutex_init (&q->lock);
   g_cond_init (&q->cond);
-  _start_thread (q);
+  event_queue_start (q);
 
   return q;
 }
@@ -103,7 +113,7 @@ event_queue_new (void)
 static void
 event_queue_free (struct event_queue *q)
 {
-  _stop_thread (q);
+  event_queue_stop_wait (q);
 
   g_mutex_clear (&q->lock);
   g_cond_clear (&q->cond);
@@ -159,6 +169,26 @@ GST_START_TEST (test_reply_data)
 
 GST_END_TEST;
 
+GST_START_TEST (test_reply_immutable)
+{
+  GstPromise *r;
+  GstStructure *s, *ret;
+
+  r = gst_promise_new ();
+
+  s = gst_structure_new ("promise", "test", G_TYPE_INT, 1, NULL);
+  gst_promise_reply (r, s);
+  ret = (GstStructure *) gst_promise_get_reply (r);
+
+  /* immutable result must not be able to modify the reply */
+  ASSERT_CRITICAL (gst_structure_set (ret, "foo", G_TYPE_STRING, "bar", NULL));
+  fail_unless (gst_structure_get_string (ret, "foo") == NULL);
+
+  gst_promise_unref (r);
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_interrupt)
 {
   GstPromise *r;
@@ -198,18 +228,16 @@ on_change (GstPromise * promise, gpointer user_data)
 {
   struct change_data *res = user_data;
 
-  res->result = gst_promise_get_result (promise);
+  res->result = gst_promise_wait (promise);
   res->change_count += 1;
 }
 
-GST_START_TEST (test_change_callback)
+GST_START_TEST (test_change_func)
 {
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_reply (r, NULL);
   fail_unless (data.result == GST_PROMISE_RESULT_REPLIED);
   fail_unless (data.change_count == 1);
@@ -224,9 +252,7 @@ GST_START_TEST (test_reply_expire)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_reply (r, NULL);
   fail_unless (data.result == GST_PROMISE_RESULT_REPLIED);
   fail_unless (data.change_count == 1);
@@ -260,9 +286,7 @@ GST_START_TEST (test_reply_interrupt)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_reply (r, NULL);
   fail_unless (data.result == GST_PROMISE_RESULT_REPLIED);
   fail_unless (data.change_count == 1);
@@ -282,9 +306,7 @@ GST_START_TEST (test_reply_reply)
   struct change_data data = { 0, };
   const GstStructure *ret;
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   s = gst_structure_new ("promise", "test", G_TYPE_INT, 1, NULL);
   gst_promise_reply (r, s);
   fail_unless (data.result == GST_PROMISE_RESULT_REPLIED);
@@ -306,9 +328,7 @@ GST_START_TEST (test_interrupt_expire)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_interrupt (r);
   fail_unless (data.result == GST_PROMISE_RESULT_INTERRUPTED);
   fail_unless (data.change_count == 1);
@@ -326,9 +346,7 @@ GST_START_TEST (test_interrupt_reply)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_interrupt (r);
   fail_unless (data.result == GST_PROMISE_RESULT_INTERRUPTED);
   fail_unless (data.change_count == 1);
@@ -346,9 +364,7 @@ GST_START_TEST (test_interrupt_interrupt)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_interrupt (r);
   fail_unless (data.result == GST_PROMISE_RESULT_INTERRUPTED);
   fail_unless (data.change_count == 1);
@@ -366,9 +382,7 @@ GST_START_TEST (test_expire_expire)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_expire (r);
   fail_unless (data.result == GST_PROMISE_RESULT_EXPIRED);
   fail_unless (data.change_count == 1);
@@ -386,9 +400,7 @@ GST_START_TEST (test_expire_interrupt)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_expire (r);
   fail_unless (data.result == GST_PROMISE_RESULT_EXPIRED);
   fail_unless (data.change_count == 1);
@@ -406,9 +418,7 @@ GST_START_TEST (test_expire_reply)
   GstPromise *r;
   struct change_data data = { 0, };
 
-  r = gst_promise_new ();
-
-  gst_promise_set_change_callback (r, on_change, &data, NULL);
+  r = gst_promise_new_with_change_func (on_change, &data, NULL);
   gst_promise_expire (r);
   fail_unless (data.result == GST_PROMISE_RESULT_EXPIRED);
   fail_unless (data.change_count == 1);
@@ -448,8 +458,8 @@ stress_reply (struct stress_item *item)
 
 struct stress_queues
 {
-  GstAtomicQueue *push_queue;
-  GstAtomicQueue *wait_queue;
+  GAsyncQueue *push_queue;
+  GAsyncQueue *wait_queue;
   guint64 push_count;
 };
 
@@ -464,12 +474,22 @@ _push_random_promise (struct event_queue *q)
   while (item->result == GST_PROMISE_RESULT_PENDING)
     item->result = g_random_int () % 4;
 
-  gst_atomic_queue_push (s_q->push_queue, item);
-  gst_atomic_queue_push (s_q->wait_queue, item);
+  g_async_queue_push (s_q->wait_queue, item);
+  g_async_queue_push (s_q->push_queue, item);
 
   s_q->push_count++;
 
   return G_SOURCE_CONTINUE;
+}
+
+static void
+_push_stop_promise (struct event_queue *q)
+{
+  struct stress_queues *s_q = q->user_data;
+  gpointer item = GINT_TO_POINTER (1);
+
+  g_async_queue_push (s_q->wait_queue, item);
+  g_async_queue_push (s_q->push_queue, item);
 }
 
 static gboolean
@@ -478,11 +498,10 @@ _pop_promise (struct event_queue *q)
   struct stress_queues *s_q = q->user_data;
   struct stress_item *item;
 
-  if (!(item = gst_atomic_queue_pop (s_q->push_queue))) {
-    /* to avoid a busywait */
-    g_usleep (1000);
-    return G_SOURCE_CONTINUE;
-  }
+  item = g_async_queue_pop (s_q->push_queue);
+
+  if (item == (void *) 1)
+    return G_SOURCE_REMOVE;
 
   stress_reply (item);
 
@@ -495,11 +514,10 @@ _wait_promise (struct event_queue *q)
   struct stress_queues *s_q = q->user_data;
   struct stress_item *item;
 
-  if (!(item = gst_atomic_queue_pop (s_q->wait_queue))) {
-    /* to avoid a busywait */
-    g_usleep (1000);
-    return G_SOURCE_CONTINUE;
-  }
+  item = g_async_queue_pop (s_q->wait_queue);
+
+  if (item == (void *) 1)
+    return G_SOURCE_REMOVE;
 
   fail_unless (gst_promise_wait (item->promise) == item->result);
 
@@ -518,8 +536,8 @@ GST_START_TEST (test_stress)
   struct stress_queues s_q = { 0, };
   int i;
 
-  s_q.push_queue = gst_atomic_queue_new (256);
-  s_q.wait_queue = gst_atomic_queue_new (256);
+  s_q.push_queue = g_async_queue_new ();
+  s_q.wait_queue = g_async_queue_new ();
 
   for (i = 0; i < N_QUEUES; i++) {
     pushers[i] = event_queue_new ();
@@ -538,27 +556,42 @@ GST_START_TEST (test_stress)
   g_usleep (100000);
   GST_INFO ("wait done, cleaning up the test.");
 
-  for (i = 0; i < N_QUEUES; i++) {
-    event_queue_free (pushers[i]);
-    /* free waiters before poppers to avoid a deadlock were taking down a waiter
-     * may be waiting for a pop however the push list is not being consumed
-     * because we've destroyed them all */
-    event_queue_free (waiters[i]);
-    event_queue_free (poppers[i]);
-  }
-
-  GST_INFO ("pushed %" G_GUINT64_FORMAT ", %d leftover in push queue, "
-      "%d leftover in wait queue", s_q.push_count,
-      gst_atomic_queue_length (s_q.push_queue),
-      gst_atomic_queue_length (s_q.wait_queue));
-
   {
     struct stress_item *item;
+    int push_size;
 
-    while ((item = gst_atomic_queue_pop (s_q.push_queue))) {
+    for (i = 0; i < N_QUEUES; i++) {
+      event_queue_stop (pushers[i]);
+      event_queue_stop (poppers[i]);
+      event_queue_stop (waiters[i]);
+      _push_stop_promise (pushers[i]);
+    }
+
+    for (i = 0; i < N_QUEUES; i++) {
+      event_queue_free (pushers[i]);
+      event_queue_free (poppers[i]);
+    }
+
+    push_size = g_async_queue_length (s_q.push_queue);
+
+    /* push through all the promises so all the waits will complete */
+    while ((item = g_async_queue_try_pop (s_q.push_queue))) {
+      if (item == (void *) 1)
+        continue;
       stress_reply (item);
     }
-    while ((item = gst_atomic_queue_pop (s_q.wait_queue))) {
+
+    for (i = 0; i < N_QUEUES; i++)
+      event_queue_free (waiters[i]);
+
+    GST_INFO ("pushed %" G_GUINT64_FORMAT ", %d leftover in push queue, "
+        "%d leftover in wait queue", s_q.push_count, push_size,
+        g_async_queue_length (s_q.wait_queue));
+
+    while ((item = g_async_queue_try_pop (s_q.wait_queue))) {
+      if (item == (void *) 1)
+        continue;
+
       fail_unless (gst_promise_wait (item->promise) == item->result);
 
       gst_promise_unref (item->promise);
@@ -566,8 +599,8 @@ GST_START_TEST (test_stress)
     }
   }
 
-  gst_atomic_queue_unref (s_q.push_queue);
-  gst_atomic_queue_unref (s_q.wait_queue);
+  g_async_queue_unref (s_q.push_queue);
+  g_async_queue_unref (s_q.wait_queue);
 }
 
 GST_END_TEST;
@@ -581,9 +614,10 @@ gst_toc_suite (void)
   suite_add_tcase (s, tc_chain);
   tcase_add_test (tc_chain, test_reply);
   tcase_add_test (tc_chain, test_reply_data);
+  tcase_add_test (tc_chain, test_reply_immutable);
   tcase_add_test (tc_chain, test_interrupt);
   tcase_add_test (tc_chain, test_expire);
-  tcase_add_test (tc_chain, test_change_callback);
+  tcase_add_test (tc_chain, test_change_func);
   tcase_add_test (tc_chain, test_reply_expire);
   tcase_add_test (tc_chain, test_reply_discard);
   tcase_add_test (tc_chain, test_reply_interrupt);
