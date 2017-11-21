@@ -24,6 +24,7 @@
 
 G_BEGIN_DECLS
 
+GST_EXPORT
 GType gst_promise_get_type(void);
 #define GST_TYPE_PROMISE            (gst_promise_get_type())
 #define GST_PROMISE(obj)            ((GstPromise *) obj)
@@ -78,14 +79,20 @@ struct _GstPromise
   gpointer              _padding[GST_PADDING];
 };
 
+GST_EXPORT
 GstPromise *            gst_promise_new                 (void);
+GST_EXPORT
 void                    gst_promise_set_change_callback (GstPromise * promise,
                                                          GstPromiseChangeFunc func,
                                                          gpointer user_data,
                                                          GDestroyNotify notify);
+GST_EXPORT
 GstPromiseResult        gst_promise_wait                (GstPromise * promise);
+GST_EXPORT
 void                    gst_promise_reply               (GstPromise * promise, GstStructure * s);
+GST_EXPORT
 void                    gst_promise_interrupt           (GstPromise * promise);
+GST_EXPORT
 void                    gst_promise_expire              (GstPromise * promise);
 
 /**
